@@ -82,8 +82,9 @@ export default function SubmitPage() {
         <div className="fade-up">
           <span className="overline"><span className="h-1.5 w-1.5 rounded-full bg-lime-300" />{t.overline}</span>
           <p className="mt-6 text-sm font-semibold uppercase tracking-[0.2em] text-zinc-500">{t.projectPre}</p>
-          <h1 className="mt-2 font-heading text-4xl font-extrabold leading-[1.02] tracking-tight text-white sm:text-5xl lg:text-6xl">
-            {t.project}<span className="text-lime-300">.</span>
+          <h1 data-testid="text-hero-title" className="mt-2 font-heading font-extrabold tracking-tight text-white">
+            <span className="block text-5xl leading-[1.02] sm:text-6xl lg:text-7xl">VIBESMAI<span className="text-lime-300">.</span></span>
+            <span className="mt-3 block text-2xl leading-tight text-zinc-300 sm:text-3xl">Music Journal &amp; AI Grading Platform</span>
           </h1>
           <p className="mt-5 max-w-md text-base leading-relaxed text-zinc-400">{t.intro}</p>
           <Requirements />
