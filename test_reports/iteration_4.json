@@ -1,0 +1,38 @@
+{
+  "summary": "Iteration 4 — validated new ASYNC contract for 'Komentar AI Siswa' + global PriorityLock. Backend: rewrote /app/backend/tests/test_feedback.py (9 cases) to match new async behaviour; ALL PASS in 94s. Verified: POST /api/admin/submissions/{id}/feedback returns 200 {feedback_status:'generating'} in <5s (401/403/404 preserved); polling GET /api/admin/submissions/{id} resolves to feedback_status='ready' with non-empty 2-3-sentence Indonesian comment that greets first name and never mentions 'metadata/privasi' within ~15-30s. PATCH {final_score:85,status:'final'} on empty-feedback record returns quickly with status='final' and feedback_status='generating', later ready. PATCH {status:'final', student_feedback:'custom'} preserves custom text, no generating state, manually_edited stays false. Bulk-status final queues feedback ONLY for records with empty feedback (filled ones left untouched). CONCURRENCY: 4 parallel public POST /submissions all reached 'draft' within 3 min (none failed); during grading, admin POST /feedback responded in <5s AND reached 'ready' quickly (teacher priority served ahead of 4 queued background grades). /api/public/results exposes student_feedback only when status='final'. Regression /app/backend/tests/test_backend_api.py: 34/34 PASS in 63s (previously-flaky test_patch_status_final_sets_status now stable because PATCH->final is async). Frontend UI (Playwright, admin cookie): Phase1 regen on Test IG Privat (XI 5/2) — button-regenerate-feedback label='Buat ulang dengan AI', click shows text-feedback-generating, textarea-student-feedback disabled, button-save-final disabled; after ~15s toast 'Komentar AI untuk siswa siap' appears and textarea refilled (339→331 chars). Phase2 Simpan Permanen on Test YouTube with cleared feedback — label='Buat dengan AI'; after clicking Save Final toast 'Nilai Final disimpan · AI sedang membuat komentar…' appears, sheet stays open, review-status=Final, text-feedback-generating shows, then toast 'Komentar AI untuk siswa siap' and textarea filled (327 chars). Phase3 /results — results_public=true, Kelas XI 5 Absen 2 renders card-student-result with text-result-feedback showing full comment and score 75/C. All critical new-feature flows green.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_feedback.py",
+    "/app/backend/tests/test_backend_api.py",
+    "/app/test_reports/pytest/feedback_async.xml",
+    "/app/test_reports/pytest/regression.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "PriorityLock (server.py L291) correctly uses heapq+Future to make teacher calls (PRIO_TEACHER=0) jump ahead of background grading (PRIO_BACKGROUND=1); the parallel-submissions concurrency test proved teacher POST /feedback completes before 4 pending grade jobs — spec compliant.",
+    "ask_llm retries 5x with exponential backoff (3,6,12,24s capped at 30s) — directly addresses prior 429 'concurrent_request_limit' flake.",
+    "feedback_job sets {feedback_status:'generating', feedback_error:None} up-front and clears to 'ready' with feedback_generated_at on success; on error logs and sets feedback_status='failed' with feedback_error (truncated to 200 chars) — good observability.",
+    "update_submission L608-611: when transitioning to 'final' with empty feedback, enqueues background feedback_job(only_if_empty=True) with PRIO_TEACHER AND persists feedback_status='generating' before response — makes the UI poll deterministic.",
+    "startup L768-782 re-queues any 'feedback_status=generating' rows left over from a crashed worker — robust against pod restarts.",
+    "bulk_status filters targets to final rows with empty feedback (L656-658) before queuing — matches spec 'queue only missing'; the test verifies a filled sibling is untouched.",
+    "ReviewSheet polling effect (L91-111) correctly guards on generating flag + clears interval on completion/180s cap and syncs form.student_feedback with latest server value — no stale UI."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_feedback.py"
+  ],
+  "success_rate": {"backend": "100% (9/9 feedback async + 34/34 regression)", "frontend": "100% (3/3 critical UI phases)"},
+  "test_credentials": "Reused seeded sessions: admin session_token='test_admin_session_vibesmai' (raraaaghs22@gmail.com), non-admin session_token='test_nonadmin_session_vibesmai' (student.other@gmail.com).",
+  "seed_data_creation": "All TEST_* / TEST_FB* / TEST_CC submissions created during pytest were cleaned up in-test (db.submissions.delete_one in finally blocks + session-scoped conftest.cleanup). Seeded 'Test YouTube' (XI 3/7) restored to status=draft, final_score=0 after UI Phase 2 flipped it to Final/80 for the async-finalize test. 'Test IG Privat' (XI 5/2, Final/75) preserved; its student_feedback text was regenerated in Phase 1 (new comment length ~331 chars) — same person/semantics, acceptable since this is the regen use case. results_public restored to false.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "test_feedback.py is now ASYNC-aware: use helper _wait_feedback_ready(client, base_url, sid, timeout=90) to poll until feedback_status=='ready'. Run with `pytest -n 0` (addopts in pytest.ini has -n 2 --dist loadscope; override). Concurrency test fires 4 real public /submissions with a public YouTube link; grading each takes ~20-45s via Gemini so budget 3 min + cleanup. Teacher-priority assertion depends on PriorityLock in server.py L291 — if that changes, update the test. 'Test YouTube' seed was reset to Draft/score=0 post-run; 'Test IG Privat' feedback text now holds the Phase1-regenerated string (comment semantics identical).",
+  "rca of the issue": "No bugs reproduced. The two action items from iteration 3 (synchronous PATCH->final latency / 429 concurrent_request_limit on bulk) are both resolved: (1) PATCH->final now enqueues feedback via BackgroundTasks with feedback_status='generating' so the HTTP response is sub-second — verified in test_patch_final_async_feedback (dt<5s). (2) ask_llm wraps every LLM call in PriorityLock + 5-attempt exponential retry so parallel grading + teacher regen never collide at the LLM gateway — verified in test_parallel_submissions_all_drafted_and_teacher_priority (4 concurrent submissions + 1 teacher regen all succeeded; no 429s in backend logs; teacher regen completed before any of the 4 grades finished)."
+}

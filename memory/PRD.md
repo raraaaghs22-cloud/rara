@@ -42,3 +42,10 @@ User choices: guru bisa mengatur apakah halaman nilai siswa ditampilkan; AI otom
 - Dashboard: kolom Nama, Kelas, Absen, Link, Status, Skor AI, Letter Grade, Aksi (Edit + Hapus merah, dialog konfirmasi teks persis). Edit sheet: embed video (YT/TikTok/IG/FB), edit skor akhir/rubrik, Simpan Draft / Simpan Permanen (Final), nilai ulang AI. Bulk Final/Draft, chip distribusi per kelas, Export to CSV / Excel (semua / per kelas).
 - /results tetap ada (toggle guru) — hanya menampilkan nilai berstatus Final.
 - Tested iteration_2: backend 33/33, frontend flows pass.
+
+## Update (Okt 2026) — Komentar AI untuk Siswa
+- Field student_feedback + feedback_status (generating|ready|failed). Gemini menulis 2–3 kalimat hangat (Bahasa Indonesia, menyapa nama depan, 1 kelebihan + 1 saran, tanpa menyebut AI/privasi/skor, tidak mengarang isi video).
+- Otomatis dibuat (latar belakang) saat Simpan Permanen (Final) bila kosong; tombol "Buat ulang dengan AI" (POST /api/admin/submissions/{id}/feedback, async + polling UI); guru bisa edit. Bulk Final juga membuat komentar.
+- Tampil di /results bersama Nilai Final (hanya status final). Kolom ekspor "Komentar untuk Siswa".
+- Antrean AI global (PriorityLock, 1 permintaan serentak, retry/backoff); aksi guru diprioritaskan di atas penilaian latar belakang. Memperbaiki kegagalan penilaian saat banyak siswa mengirim bersamaan.
+- Tested iteration_4: 9/9 feedback + 34/34 regression, UI pass.
