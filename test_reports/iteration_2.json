@@ -1,0 +1,39 @@
+{
+  "summary": "VIBESMAI end-to-end testing (new schema): backend pytest 33/33 passed (health, auth RBAC admin/non-admin 401/403, submission validation inc. invalid platform/class, legacy video_url alias, admin list filters by class/status(pending incl. processing)/q, stats keys, PATCH final_score+grade, PATCH rubric weighted 50/30/20, PATCH status=final sets final, PATCH status=final without score -> 422, bulk-status final, DELETE then 404, CSV/XLSX export headers & 'Semua Kelas'+per-class sheets, public results disabled 403 + enabled hides non-final/only exposes final_score+final_grade, seeded IG-private privacy-mode fallback). Playwright UI: /submit dark-theme bilingual form, invalid-link validation, YouTube platform badge, exact success message, 'Kirim link lain' reset; /dashboard & /login redirect to /admin; /admin unauth shows button-google-login; non-admin session shows banner-not-admin; admin session loads table with 2 seeded rows, name search filters to 1, class XI 5 filter -> 1, Edit sheet opens with extraction-failed banner for IG private, final-score input updates grade badge (88 -> B), Hapus dialog shows exact Indonesian confirm text and Batal cancels, Export popover opens with scope select + CSV/Excel buttons, results_public toggle persists; /results page with switch enabled shows card for XI 3 absen 7.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Dashboard Export popover (native <select data-testid=export-scope-select>)",
+       "issues": ["React console warning: '<span> cannot be a child of <option>' causing a hydration warning on class options. Native <option> only allows text; remove inner markup/<span> inside <option> or switch to shadcn Select."]}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_backend_api.py",
+    "/app/backend/tests/conftest.py",
+    "/app/test_reports/pytest/pytest_results.xml"
+  ],
+  "action_items": [
+    "(Low) Remove any inner <span>/HTML inside native <option> in Toolbar export-scope-select to silence React hydration warning (or switch to shadcn Select). Current options already use plain text so warning likely originates from another native select; verify FilterBar / native selects for stray span children."
+  ],
+  "critical_code_review_comments": [
+    "server.py is a single ~640-line file. For maintainability it could be split into routers (auth / public / admin / export). Not a bug.",
+    "Session cookies set with Secure+SameSite=None; correct for HTTPS preview and allows cross-site auth callbacks.",
+    "Admin bootstrap uses $setOnInsert so the first login becomes permanent admin; ADMIN_EMAIL env also safely seeds on startup — good.",
+    "PATCH endpoint correctly recomputes final_grade from final_score, enforces 422 when finalizing without score, and marks manually_edited only on meaningful fields — spec compliant.",
+    "Metadata extraction uses facebookexternalhit UA; privacy fallback deterministically yields score 0, grade D, Indonesian weakness string — matches teacher prompt.",
+    "No MongoDB ObjectId leaks in any public/admin response (all projections exclude _id)."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_backend_api.py",
+    "/app/backend/tests/conftest.py"
+  ],
+  "success_rate": {"backend": "100% (33/33 non-slow)", "frontend": "100% of tested flows"},
+  "test_credentials": "Seeded sessions in Mongo: admin session_token='test_admin_session_vibesmai' (user raraaaghs22@gmail.com), non-admin session_token='test_nonadmin_session_vibesmai' (student.other@gmail.com). Pass as cookie on vibesmai.preview.emergentagent.com (Secure, SameSite=None, httpOnly=false for Playwright) or Authorization: Bearer header. ADMIN_EMAIL env preset to raraaaghs22@gmail.com. NOTE: /app/memory/test_credentials.md does not exist — only PRD.md is in /app/memory; credentials were obtained from Mongo and the task payload. Main agent may want to add /app/memory/test_credentials.md for future runs.",
+  "seed_data_creation": "Created transient TEST_ submissions during pytest and one TEST_UI Playwright submission; all cleaned via conftest cleanup fixture + manual mongosh deleteMany({full_name:/^TEST_/}). results_public restored to false.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Backend regression suite at /app/backend/tests/test_backend_api.py (pytest, 33 tests, use `pytest -m 'not slow'`). Fixtures in conftest.py use seeded sessions test_admin_session_vibesmai / test_nonadmin_session_vibesmai (no need to create per-test users). Seeded demo rows 'Test YouTube' (XI 3 absen 7) and 'Test IG Privat' (XI 5 absen 2) must NOT be deleted. For UI, set the session_token cookie on the preview domain before visiting /admin.",
+  "rca of the issue": "No reproduced bugs. The hydration-warning noise about <span> in <option> is cosmetic and does not affect behavior."
+}

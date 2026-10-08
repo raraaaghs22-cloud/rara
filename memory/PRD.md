@@ -34,3 +34,11 @@ User choices: guru bisa mengatur apakah halaman nilai siswa ditampilkan; AI otom
 
 ## Update (Juni 2026) — Hapus Data
 - Kolom Aksi di tabel dashboard: tombol hapus (ikon tempat sampah merah) di samping Tinjau -> AlertDialog konfirmasi (Batal / Ya, Hapus) -> DELETE /api/admin/submissions/{id} (404 jika tidak ada) -> toast "Data berhasil dihapus", baris dihapus dari state tanpa reload, stats di-refresh. File: DeleteDialog.jsx, JournalTable.jsx, Dashboard.jsx. Diverifikasi via Playwright.
+
+## Update (Okt 2026) — VIBESMAI v2
+- Rebrand ke VIBESMAI, tema gelap modern (Unbounded/Manrope, aksen lime). Dashboard di /admin (/dashboard & /login redirect). Login tampil inline di /admin.
+- Skema baru: video_link, created_at, status pending|processing|draft|final|failed, ai_score, ai_letter_grade, ai_strengths, ai_weaknesses (+ rubrik), final_score/final_grade (edit guru). Migrasi otomatis data lama saat startup.
+- AI: system prompt persis dari guru; metadata (judul, caption, hashtag, mention) dikirim ke gemini-3.1-pro-preview; link privat -> teks "Data gagal diekstrak karena privasi link." dikirim ke AI, hasil dipaksa skor 0 / grade D / pesan privasi.
+- Dashboard: kolom Nama, Kelas, Absen, Link, Status, Skor AI, Letter Grade, Aksi (Edit + Hapus merah, dialog konfirmasi teks persis). Edit sheet: embed video (YT/TikTok/IG/FB), edit skor akhir/rubrik, Simpan Draft / Simpan Permanen (Final), nilai ulang AI. Bulk Final/Draft, chip distribusi per kelas, Export to CSV / Excel (semua / per kelas).
+- /results tetap ada (toggle guru) — hanya menampilkan nilai berstatus Final.
+- Tested iteration_2: backend 33/33, frontend flows pass.

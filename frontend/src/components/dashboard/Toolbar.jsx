@@ -40,7 +40,7 @@ const ExportMenu = () => {
         </div>
         <select data-testid="export-scope-select" value={scope} onChange={(e) => setScope(e.target.value)} className="h-10 w-full rounded-xl border border-white/10 bg-zinc-900 px-3 text-sm text-white">
           <option value="all">Semua kelas (12 kelas)</option>
-          {CLASSES.map((c) => <option key={c} value={c}>Kelas {c}</option>)}
+          {CLASSES.map((c) => <option key={c} value={c}>{`Kelas ${c}`}</option>)}
         </select>
         <div className="grid grid-cols-2 gap-2">
           <button data-testid="button-export-csv" onClick={() => run("csv")} className="flex h-10 items-center justify-center gap-2 rounded-xl text-sm font-semibold text-zinc-200 ring-1 ring-white/10 hover:bg-white/5"><FileText className="h-4 w-4" /> CSV</button>

@@ -101,3 +101,8 @@
 #====================================================================================================
 # Testing Data - Main Agent and testing sub agent both should log testing data below this section
 #====================================================================================================
+user_problem_statement: "VIBESMAI — Music Journal & AI Grading. Public /submit (bilingual, no login) saves Private Draft; teacher dashboard /admin (Emergent Google Auth, first-in admin) with table, class filter, name search, Edit (AI strengths/weaknesses, manual watch, edit final score, save permanently=Final), red Hapus with confirm dialog, Export CSV/Excel. Backend AI: oEmbed/metadata extraction -> Gemini 3.1 Pro with exact system prompt -> JSON ai_score/ai_letter_grade/ai_strengths/ai_weaknesses -> status draft. Privacy-blocked link -> 'Data gagal diekstrak karena privasi link.' sent to AI -> score 0, grade D. Dark modern theme."
+
+agent_communication:
+    - agent: "main"
+      message: "Iteration 2: schema renamed (video_link, created_at, ai_score, ai_letter_grade, ai_strengths, ai_weaknesses, final_score, final_grade, status pending|processing|draft|final|failed). Endpoints: POST /api/submissions, GET /api/admin/submissions?class_name&status&platform&q, GET/PATCH/DELETE /api/admin/submissions/{id}, POST /api/admin/submissions/{id}/regrade, POST /api/admin/bulk-status {ids,status}, GET /api/admin/stats, GET /api/admin/export?format=csv|xlsx&class_name, GET/PUT /api/admin/settings, GET /api/public/settings, GET /api/public/results. Full dark redesign + /admin route."
