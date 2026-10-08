@@ -1,5 +1,5 @@
 .font-heading {
-  font-family: "Plus Jakarta Sans", sans-serif;
+  font-family: "Unbounded", sans-serif;
 }
 
 .font-mono {
@@ -7,14 +7,17 @@
 }
 
 .overline {
-  display: inline-block;
-  font-size: 0.7rem;
-  font-weight: 800;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.68rem;
+  font-weight: 700;
   text-transform: uppercase;
-  letter-spacing: 0.14em;
-  color: #b45309;
-  background: rgba(254, 243, 199, 0.8);
-  padding: 0.3rem 0.7rem;
+  letter-spacing: 0.18em;
+  color: #c6f35e;
+  border: 1px solid rgba(198, 243, 94, 0.25);
+  background: rgba(198, 243, 94, 0.06);
+  padding: 0.35rem 0.75rem;
   border-radius: 9999px;
 }
 
@@ -27,12 +30,43 @@
   to { opacity: 1; transform: translateY(0); }
 }
 
-.grain {
-  background-image: radial-gradient(rgba(120, 53, 15, 0.05) 1px, transparent 1px);
-  background-size: 18px 18px;
+.bg-grid {
+  background-image:
+    linear-gradient(rgba(255, 255, 255, 0.035) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.035) 1px, transparent 1px);
+  background-size: 44px 44px;
+}
+
+.glow-lime {
+  background: radial-gradient(600px circle at 15% 0%, rgba(198, 243, 94, 0.10), transparent 60%),
+    radial-gradient(500px circle at 90% 10%, rgba(167, 139, 250, 0.08), transparent 60%);
+}
+
+.eq span {
+  display: inline-block;
+  width: 3px;
+  border-radius: 2px;
+  background: #c6f35e;
+  animation: eq 1.1s ease-in-out infinite;
+}
+.eq span:nth-child(2) { animation-delay: 0.15s; }
+.eq span:nth-child(3) { animation-delay: 0.3s; }
+.eq span:nth-child(4) { animation-delay: 0.45s; }
+
+@keyframes eq {
+  0%, 100% { height: 4px; }
+  50% { height: 16px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .eq span, .fade-up { animation: none; }
 }
 
 ::selection {
-  background: #fde68a;
-  color: #0f172a;
+  background: #c6f35e;
+  color: #08080a;
 }
+
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: #0c0c0f; }
+::-webkit-scrollbar-thumb { background: #27272a; border-radius: 9999px; }

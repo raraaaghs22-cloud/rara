@@ -42,15 +42,8 @@ PLATFORM_PATTERNS = {
     "instagram": r"(^|\.)(instagram\.com|instagr\.am)$",
     "facebook": r"(^|\.)(facebook\.com|fb\.watch|fb\.com)$",
 }
-ASSIGNMENT = """Judul tugas: "Creative Video Project: Musik di Sekitar Kita"
-Ketentuan: Durasi 60-90 detik, format vertikal 9:16, menjelaskan fungsi musik dengan contoh dunia nyata, dan dilengkapi subtitle.
-Wajib memakai hashtag #FungsiMusik dan tag @Mr. Ocha."""
-RUBRIC = """Rubrik penilaian (skala 0-100 per aspek):
-1. Content & Context (Bobot 50%): Apakah deskripsi video menunjukkan pemahaman yang akurat tentang fungsi musik di dunia nyata?
-2. Delivery & Subtitles (Bobot 30%): Apakah gaya bahasa di caption komunikatif, jelas, dan menyiratkan adanya penyampaian visual/teks yang baik?
-3. Technical & Tagging (Bobot 20%): Apakah terdapat hashtag #FungsiMusik dan mention @Mr. Ocha di dalam teks/caption?"""
-UNREADABLE_MSG = ("Sistem tidak dapat membaca deskripsi/konten video ini karena pembatasan privasi platform. "
-                  "Silakan klik tautan untuk menonton dan menilai video ini secara manual.")
+EXTRACTION_FAILED = "Data gagal diekstrak karena privasi link."
+PRIVACY_WEAKNESS = "Sistem tidak dapat membaca konten karena privasi. Silakan nilai secara manual"
 
 
 def now_iso():
@@ -97,7 +90,8 @@ class SubmissionIn(BaseModel):
     full_name: str = Field(min_length=2, max_length=120)
     class_name: str
     attendance_number: int = Field(ge=1, le=60)
-    video_url: str = Field(max_length=1000)
+    video_link: Optional[str] = Field(default=None, max_length=1000)
+    video_url: Optional[str] = Field(default=None, max_length=1000)  # legacy alias
 
     @field_validator("class_name")
     @classmethod
@@ -106,25 +100,26 @@ class SubmissionIn(BaseModel):
             raise ValueError("Invalid class")
         return v
 
-    @field_validator("full_name", "video_url")
+    @field_validator("full_name", "video_link", "video_url")
     @classmethod
     def strip(cls, v):
-        return v.strip()
+        return v.strip() if isinstance(v, str) else v
 
 
 class SubmissionUpdate(BaseModel):
     content_score: Optional[float] = Field(default=None, ge=0, le=100)
     delivery_score: Optional[float] = Field(default=None, ge=0, le=100)
     technical_score: Optional[float] = Field(default=None, ge=0, le=100)
-    strengths: Optional[str] = None
-    weaknesses: Optional[str] = None
+    final_score: Optional[float] = Field(default=None, ge=0, le=100)
+    ai_strengths: Optional[str] = None
+    ai_weaknesses: Optional[str] = None
     teacher_notes: Optional[str] = None
-    published: Optional[bool] = None
+    status: Optional[str] = Field(default=None, pattern="^(draft|final)$")
 
 
-class BulkPublish(BaseModel):
+class BulkStatus(BaseModel):
     ids: List[str]
-    published: bool
+    status: str = Field(pattern="^(draft|final)$")
 
 
 class SettingsIn(BaseModel):
@@ -283,25 +278,40 @@ async def fetch_metadata(url: str, platform: str) -> dict:
 
 
 # ---------- AI grading ----------
-SYSTEM_PROMPT = f"""Kamu adalah Asisten Guru Seni Musik SMA yang sangat objektif dan teliti. Tugasmu adalah mengevaluasi metadata dari tautan video (Judul, Caption/Deskripsi, Hashtag, dan Teks yang tersedia) yang dikirimkan oleh siswa untuk tugas 'Creative Video Project: Musik di Sekitar Kita'.
-{ASSIGNMENT}
+SYSTEM_PROMPT = """Kamu adalah Asisten Guru Seni Musik SMA. Evaluasi metadata video ini untuk tugas 'Musik di Sekitar Kita'. JIKA data berisi pesan 'Data gagal diekstrak...', BERHENTI menilai, berikan skor 0, dan tulis di Weaknesses: 'Sistem tidak dapat membaca konten karena privasi. Silakan nilai secara manual'. JIKA data tersedia, nilai dengan rubrik berikut: Content & Context (50%): Penjelasan fungsi musik & contoh nyata. Delivery & Subtitles (30%): Gaya bahasa komunikatif & teks. Technical & Tagging (20%): Ada #FungsiMusik dan mention @Mr. Ocha.
 
-ATURAN PENANGANAN ERROR: Sebelum menilai, periksa apakah data (metadata/caption) tersedia. JIKA data yang diterima kosong, atau berisi pesan error (seperti 'Access Denied', '403', dsb) karena video TikTok/IG/FB dikunci/diprivasi, MAKA JANGAN MENGARANG NILAI. Langsung keluarkan:
-{{"unreadable": true, "content_score": 0, "delivery_score": 0, "technical_score": 0, "strengths": "-", "weaknesses": "{UNREADABLE_MSG}"}}
+FORMAT OUTPUT WAJIB: SELALU kembalikan HANYA objek JSON murni (tanpa teks pengantar, tanpa markdown, tanpa ```), dengan kunci:
+"ai_score" (angka 0-100, = content_score*0.5 + delivery_score*0.3 + technical_score*0.2),
+"ai_letter_grade" (huruf "A" | "B" | "C" | "D"; A >= 90, B 80-89, C 70-79, D < 70),
+"ai_strengths" (string, kelebihan dalam Bahasa Indonesia),
+"ai_weaknesses" (string, kekurangan & saran dalam Bahasa Indonesia),
+"content_score" (0-100), "delivery_score" (0-100), "technical_score" (0-100)."""
 
-{RUBRIC}
-Nilai akhir = Content×0.5 + Delivery×0.3 + Technical×0.2. Letter Grade: A (>90), B (80-89), C (70-79), D (<70).
-
-FORMAT OUTPUT WAJIB: Balas HANYA dengan JSON valid (tanpa markdown) dengan kunci:
-"unreadable" (boolean), "content_score" (0-100), "delivery_score" (0-100), "technical_score" (0-100),
-"strengths" (string, 1-2 kalimat kelebihan berdasarkan teks yang dianalisis, Bahasa Indonesia),
-"weaknesses" (string, 1-2 kalimat saran perbaikan yang membangun, Bahasa Indonesia),
-"data_confidence" ("high" | "medium" | "low")."""
+HASHTAG_RE = re.compile(r"#[\w\u00C0-\u024F]+", re.UNICODE)
+MENTION_RE = re.compile(r"@[\w.]+(?:\s(?:Ocha))?", re.UNICODE)
 
 
-def unreadable_result() -> dict:
-    return {"content_score": 0.0, "delivery_score": 0.0, "technical_score": 0.0, "final_score": 0.0, "grade": "N/A",
-            "strengths": "-", "weaknesses": UNREADABLE_MSG, "data_confidence": "none", "graded_at": now_iso()}
+def metadata_text(meta: dict) -> str:
+    """Build the text payload for the AI. Returns EXTRACTION_FAILED if nothing readable was extracted."""
+    if not has_readable_text(meta):
+        return EXTRACTION_FAILED
+    page = meta.get("page", {})
+    title = meta.get("oembed", {}).get("title") or page.get("title") or "-"
+    caption = page.get("full_description") or page.get("description") or "-"
+    blob = " ".join(str(x) for x in (title, caption, page.get("keywords", "")))
+    hashtags = sorted(set(HASHTAG_RE.findall(blob)))
+    mentions = sorted(set(m.strip() for m in MENTION_RE.findall(blob)))
+    lines = [f"Platform: {meta.get('platform')}", f"Judul Video: {title}",
+             f"Akun Pengunggah: {meta.get('oembed', {}).get('author_name', '-')}",
+             f"Caption/Deskripsi: {caption}", f"Hashtag: {', '.join(hashtags) or '-'}",
+             f"Mention: {', '.join(mentions) or '-'}"]
+    if page.get("keywords"):
+        lines.append(f"Keywords: {page['keywords']}")
+    if page.get("duration_seconds"):
+        lines.append(f"Durasi: {page['duration_seconds']} detik")
+    if meta.get("url_hint"):
+        lines.append(f"Petunjuk URL: {meta['url_hint']}")
+    return "\n".join(lines)
 
 
 def parse_json(text: str) -> dict:
@@ -310,36 +320,46 @@ def parse_json(text: str) -> dict:
     return json.loads(m.group(0) if m else text)
 
 
+def clamp(v, default=0.0) -> float:
+    try:
+        return round(max(0.0, min(100.0, float(v))), 1)
+    except (TypeError, ValueError):
+        return default
+
+
 async def grade_submission(sub_id: str):
     sub = await db.submissions.find_one({"id": sub_id}, {"_id": 0})
     if not sub:
         return
     await db.submissions.update_one({"id": sub_id}, {"$set": {"status": "processing", "error": None}})
     try:
-        meta = await fetch_metadata(sub["video_url"], sub["platform"])
-        if not has_readable_text(meta):
-            ai = unreadable_result()
+        meta = await fetch_metadata(sub["video_link"], sub["platform"])
+        payload = metadata_text(meta)
+        extraction_ok = payload != EXTRACTION_FAILED
+        chat = LlmChat(api_key=EMERGENT_LLM_KEY, session_id=f"grade-{sub_id}-{uuid.uuid4().hex[:6]}",
+                       system_message=SYSTEM_PROMPT).with_model("gemini", "gemini-3.1-pro-preview")
+        prompt = (f"Siswa: {sub['full_name']} (Kelas {sub['class_name']}, Absen {sub['attendance_number']})\n"
+                  f"Link video: {sub['video_link']}\n\nMetadata video:\n{payload}")
+        reply = await chat.send_message(UserMessage(text=prompt))
+        res = parse_json(reply)
+        if not extraction_ok:
+            c = d = t = score = 0.0
+            strengths = res.get("ai_strengths") or "-"
+            weaknesses = PRIVACY_WEAKNESS
         else:
-            chat = LlmChat(api_key=EMERGENT_LLM_KEY, session_id=f"grade-{sub_id}-{uuid.uuid4().hex[:6]}",
-                           system_message=SYSTEM_PROMPT).with_model("gemini", "gemini-3.1-pro-preview")
-            prompt = (f"Siswa: {sub['full_name']} (Kelas {sub['class_name']}, Absen {sub['attendance_number']})\n"
-                      f"Link video: {sub['video_url']}\nMetadata hasil inspeksi:\n{json.dumps(meta, ensure_ascii=False, indent=2)}")
-            reply = await chat.send_message(UserMessage(text=prompt))
-            res = parse_json(reply)
-            if res.get("unreadable"):
-                ai = unreadable_result()
-            else:
-                c, d, t = (max(0.0, min(100.0, float(res[k]))) for k in ("content_score", "delivery_score", "technical_score"))
-                score = weighted(c, d, t)
-                ai = {"content_score": c, "delivery_score": d, "technical_score": t, "final_score": score,
-                      "grade": letter_grade(score), "strengths": res.get("strengths", ""),
-                      "weaknesses": res.get("weaknesses", ""), "data_confidence": res.get("data_confidence", "low"),
-                      "graded_at": now_iso()}
+            c, d, t = (clamp(res.get(k)) for k in ("content_score", "delivery_score", "technical_score"))
+            score = clamp(res.get("ai_score"), weighted(c, d, t))
+            strengths = res.get("ai_strengths", "")
+            weaknesses = res.get("ai_weaknesses", "")
+        grade = letter_grade(score)
+        ai = {"ai_score": score, "ai_letter_grade": grade, "ai_strengths": strengths, "ai_weaknesses": weaknesses,
+              "content_score": c, "delivery_score": d, "technical_score": t,
+              "raw_letter_grade": res.get("ai_letter_grade"), "graded_at": now_iso()}
         await db.submissions.update_one({"id": sub_id}, {"$set": {
-            "status": "graded", "metadata": meta, "ai": ai,
-            **{k: ai[k] for k in ("content_score", "delivery_score", "technical_score", "final_score",
-                                  "grade", "strengths", "weaknesses")},
-            "manually_edited": False}})
+            "status": "draft", "metadata": meta, "ai_input": payload, "extraction_ok": extraction_ok, "ai": ai,
+            "ai_score": score, "ai_letter_grade": grade, "ai_strengths": strengths, "ai_weaknesses": weaknesses,
+            "content_score": c, "delivery_score": d, "technical_score": t,
+            "final_score": score, "final_grade": grade, "manually_edited": False, "updated_at": now_iso()}})
     except Exception as e:
         logger.exception("AI grading failed")
         await db.submissions.update_one({"id": sub_id}, {"$set": {"status": "failed", "error": str(e)[:300]}})
@@ -353,21 +373,24 @@ async def results_public() -> bool:
 
 @api.get("/")
 async def root():
-    return {"message": "Music Journal API"}
+    return {"message": "VIBESMAI API"}
 
 
 @api.post("/submissions")
 async def create_submission(data: SubmissionIn, bg: BackgroundTasks):
-    url = data.video_url
+    url = (data.video_link or data.video_url or "").strip()
+    if not url:
+        raise HTTPException(422, "Video link is required")
     if not re.match(r"^https?://", url, re.I):
         url = "https://" + url
     platform = detect_platform(url)
     if not platform:
         raise HTTPException(422, "Link must be from TikTok, Instagram, Facebook, or YouTube")
     doc = {"id": str(uuid.uuid4()), "full_name": data.full_name, "class_name": data.class_name,
-           "attendance_number": data.attendance_number, "video_url": url, "platform": platform,
-           "status": "pending", "published": False, "manually_edited": False, "teacher_notes": "",
-           "submitted_at": now_iso()}
+           "attendance_number": data.attendance_number, "video_link": url, "platform": platform,
+           "status": "pending", "ai_score": None, "ai_letter_grade": None, "ai_strengths": None,
+           "ai_weaknesses": None, "final_score": None, "final_grade": None,
+           "manually_edited": False, "teacher_notes": "", "created_at": now_iso()}
     await db.submissions.insert_one(doc)
     bg.add_task(grade_submission, doc["id"])
     return {"ok": True, "message": "Your video assignment link has been successfully submitted / Tugas link video Anda berhasil dikirimkan."}
@@ -383,53 +406,57 @@ async def public_results(class_name: str, attendance_number: int):
     if not await results_public():
         raise HTTPException(403, "Results page is disabled")
     subs = await db.submissions.find({"class_name": class_name, "attendance_number": attendance_number},
-                                     {"_id": 0}).sort("submitted_at", -1).to_list(50)
-    return [{"full_name": s["full_name"], "class_name": s["class_name"], "attendance_number": s["attendance_number"],
-             "platform": s["platform"], "submitted_at": s["submitted_at"], "published": s.get("published", False),
-             "final_score": s.get("final_score") if s.get("published") else None,
-             "grade": s.get("grade") if s.get("published") else None} for s in subs]
+                                     {"_id": 0}).sort("created_at", -1).to_list(50)
+    out = []
+    for s in subs:
+        final = s.get("status") == "final"
+        out.append({"full_name": s["full_name"], "class_name": s["class_name"],
+                    "attendance_number": s["attendance_number"], "platform": s["platform"],
+                    "created_at": s["created_at"], "is_final": final,
+                    "final_score": s.get("final_score") if final else None,
+                    "final_grade": s.get("final_grade") if final else None})
+    return out
 
 
 # ---------- Admin ----------
-def build_query(class_name, platform, status, q, published=None):
+def build_query(class_name, platform, status, q):
     query = {}
     if class_name:
         query["class_name"] = class_name
     if platform:
         query["platform"] = platform
-    if status:
+    if status == "pending":
+        query["status"] = {"$in": ["pending", "processing"]}
+    elif status:
         query["status"] = status
-    if published is not None:
-        query["published"] = published
     if q:
         query["full_name"] = {"$regex": re.escape(q), "$options": "i"}
     return query
 
 
 def class_sort_key(s):
-    return (int(s["class_name"].split()[-1]), s["attendance_number"], s["submitted_at"])
+    return (int(s["class_name"].split()[-1]), s["attendance_number"], s["created_at"])
 
 
 @api.get("/admin/submissions")
 async def list_submissions(class_name: Optional[str] = None, platform: Optional[str] = None,
                            status: Optional[str] = None, q: Optional[str] = None,
-                           published: Optional[bool] = None, _: dict = Depends(require_admin)):
-    return await db.submissions.find(build_query(class_name, platform, status, q, published),
-                                     {"_id": 0, "metadata": 0}).sort("submitted_at", -1).to_list(5000)
+                           _: dict = Depends(require_admin)):
+    return await db.submissions.find(build_query(class_name, platform, status, q),
+                                     {"_id": 0, "metadata": 0, "ai_input": 0}).sort("created_at", -1).to_list(5000)
 
 
 @api.get("/admin/stats")
 async def stats(_: dict = Depends(require_admin)):
-    subs = await db.submissions.find({}, {"_id": 0, "status": 1, "final_score": 1, "published": 1, "class_name": 1}).to_list(10000)
-    graded = [s for s in subs if s.get("final_score") is not None]
+    subs = await db.submissions.find({}, {"_id": 0, "status": 1, "final_score": 1, "class_name": 1}).to_list(10000)
+    scored = [s for s in subs if s.get("final_score") is not None]
     per_class = {c: 0 for c in CLASSES}
     for s in subs:
         per_class[s["class_name"]] = per_class.get(s["class_name"], 0) + 1
-    return {"total": len(subs), "graded": len(graded),
-            "pending": sum(1 for s in subs if s["status"] in ("pending", "processing")),
-            "failed": sum(1 for s in subs if s["status"] == "failed"),
-            "published": sum(1 for s in subs if s.get("published")),
-            "avg_score": round(sum(s["final_score"] for s in graded) / len(graded), 1) if graded else None,
+    count = lambda *st: sum(1 for s in subs if s["status"] in st)  # noqa: E731
+    return {"total": len(subs), "draft": count("draft"), "final": count("final"),
+            "pending": count("pending", "processing"), "failed": count("failed"),
+            "avg_score": round(sum(s["final_score"] for s in scored) / len(scored), 1) if scored else None,
             "per_class": per_class}
 
 
@@ -448,17 +475,23 @@ async def update_submission(sub_id: str, data: SubmissionUpdate, _: dict = Depen
         raise HTTPException(404, "Not found")
     upd = data.model_dump(exclude_none=True)
     score_keys = {"content_score", "delivery_score", "technical_score"}
-    if score_keys & upd.keys():
+    if "final_score" in upd:
+        upd["final_score"] = round(upd["final_score"], 1)
+    elif score_keys & upd.keys():
         merged = {k: upd.get(k, s.get(k)) for k in score_keys}
         if any(v is None for v in merged.values()):
             raise HTTPException(422, "All three rubric scores are required")
         upd["final_score"] = weighted(merged["content_score"], merged["delivery_score"], merged["technical_score"])
-        upd["grade"] = letter_grade(upd["final_score"])
-        if s.get("status") != "graded":
-            upd["status"] = "graded"
-    if upd.get("published") and (upd.get("final_score") if "final_score" in upd else s.get("final_score")) is None:
-        raise HTTPException(422, "Cannot publish without a score")
-    if set(upd) - {"published", "teacher_notes"}:
+    if "final_score" in upd:
+        upd["final_grade"] = letter_grade(upd["final_score"])
+    new_status = upd.get("status")
+    if new_status == "final":
+        if (upd.get("final_score") if "final_score" in upd else s.get("final_score")) is None:
+            raise HTTPException(422, "Cannot finalize without a score")
+        upd["finalized_at"] = now_iso()
+    elif new_status == "draft" and s.get("status") in ("pending", "processing", "failed") and "final_score" not in upd:
+        upd.pop("status")
+    if set(upd) - {"status", "teacher_notes", "finalized_at"}:
         upd["manually_edited"] = True
     upd["updated_at"] = now_iso()
     await db.submissions.update_one({"id": sub_id}, {"$set": upd})
@@ -482,12 +515,13 @@ async def delete_submission(sub_id: str, _: dict = Depends(require_admin)):
     return {"ok": True}
 
 
-@api.post("/admin/publish")
-async def bulk_publish(data: BulkPublish, _: dict = Depends(require_admin)):
-    query = {"id": {"$in": data.ids}}
-    if data.published:
-        query["final_score"] = {"$ne": None}
-    res = await db.submissions.update_many(query, {"$set": {"published": data.published, "updated_at": now_iso()}})
+@api.post("/admin/bulk-status")
+async def bulk_status(data: BulkStatus, _: dict = Depends(require_admin)):
+    query = {"id": {"$in": data.ids}, "final_score": {"$ne": None}}
+    upd = {"status": data.status, "updated_at": now_iso()}
+    if data.status == "final":
+        upd["finalized_at"] = now_iso()
+    res = await db.submissions.update_many(query, {"$set": upd})
     return {"updated": res.modified_count}
 
 
@@ -502,25 +536,38 @@ async def put_settings(data: SettingsIn, _: dict = Depends(require_admin)):
     return {"results_public": data.results_public}
 
 
-EXPORT_COLS = [("Kelas", "class_name"), ("No. Absen", "attendance_number"), ("Nama Lengkap", "full_name"),
-               ("Platform", "platform"), ("Link Video", "video_url"), ("Waktu Kirim", "submitted_at"),
-               ("Status", "status"), ("Content & Context (50%)", "content_score"),
-               ("Delivery & Subtitles (30%)", "delivery_score"), ("Technical & Tagging (20%)", "technical_score"),
-               ("Nilai Akhir", "final_score"), ("Grade", "grade"), ("Dipublikasikan", "published"),
-               ("Diedit Manual", "manually_edited"), ("Kelebihan", "strengths"),
-               ("Kekurangan & Saran", "weaknesses"), ("Catatan Guru", "teacher_notes")]
+STATUS_LABEL = {"pending": "Diproses", "processing": "Diproses", "draft": "Draft", "final": "Final", "failed": "Gagal"}
+EXPORT_COLS = [("Kelas", "class_name"), ("No. Absen", "attendance_number"), ("Nama Siswa", "full_name"),
+               ("Platform", "platform"), ("Link Video", "video_link"), ("Waktu Kirim", "created_at"),
+               ("Status", "status"), ("Skor AI", "ai_score"), ("Grade AI", "ai_letter_grade"),
+               ("Content & Context (50%)", "content_score"), ("Delivery & Subtitles (30%)", "delivery_score"),
+               ("Technical & Tagging (20%)", "technical_score"), ("Nilai Akhir", "final_score"),
+               ("Letter Grade", "final_grade"), ("Diedit Manual", "manually_edited"),
+               ("Kelebihan (AI)", "ai_strengths"), ("Kekurangan & Saran (AI)", "ai_weaknesses"),
+               ("Catatan Guru", "teacher_notes")]
+WIDE_COLS = {"video_link", "ai_strengths", "ai_weaknesses", "teacher_notes"}
+
+
+def export_cell(s: dict, k: str):
+    v = s.get(k)
+    if k == "manually_edited":
+        return "Ya" if v else "Tidak"
+    if k == "status":
+        return STATUS_LABEL.get(v, v or "")
+    return "" if v is None else v
 
 
 @api.get("/admin/export")
 async def export(format: str = Query("csv", pattern="^(csv|xlsx)$"), class_name: Optional[str] = None,
                  _: dict = Depends(require_admin)):
-    subs = await db.submissions.find(build_query(class_name, None, None, None), {"_id": 0, "metadata": 0}).to_list(10000)
+    subs = await db.submissions.find(build_query(class_name, None, None, None),
+                                     {"_id": 0, "metadata": 0, "ai_input": 0}).to_list(10000)
     subs.sort(key=class_sort_key)
-    rows = [[("Ya" if s.get(k) else "Tidak") if k in ("published", "manually_edited") else s.get(k, "") if s.get(k) is not None else ""
-             for _, k in EXPORT_COLS] for s in subs]
+    rows = [[export_cell(s, k) for _, k in EXPORT_COLS] for s in subs]
     headers = [h for h, _ in EXPORT_COLS]
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d")
     suffix = f"_kelas_{class_name.replace(' ', '_')}" if class_name else ""
+    fname = f"vibesmai_rekap_nilai{suffix}_{stamp}"
     if format == "csv":
         buf = io.StringIO()
         buf.write("\ufeff")
@@ -528,30 +575,48 @@ async def export(format: str = Query("csv", pattern="^(csv|xlsx)$"), class_name:
         w.writerow(headers)
         w.writerows(rows)
         return Response(buf.getvalue(), media_type="text/csv; charset=utf-8",
-                        headers={"Content-Disposition": f'attachment; filename="rekap_nilai_seni_musik{suffix}_{stamp}.csv"'})
+                        headers={"Content-Disposition": f'attachment; filename="{fname}.csv"'})
     wb = Workbook()
     wb.remove(wb.active)
     if class_name:
-        groups = [(f"Kelas {class_name}", subs)]
+        groups = [(f"Kelas {class_name}", list(range(len(subs))))]
     else:
-        groups = [("Semua Kelas", subs)] + [(c, [s for s in subs if s["class_name"] == c]) for c in CLASSES]
-    for title, items in groups:
-        if title not in ("Semua Kelas", f"Kelas {class_name}") and not items:
+        groups = [("Semua Kelas", list(range(len(subs))))] + \
+                 [(c, [i for i, s in enumerate(subs) if s["class_name"] == c]) for c in CLASSES]
+    for idx, (title, items) in enumerate(groups):
+        if idx > 0 and not items:
             continue
         ws = wb.create_sheet(title)
         ws.append(headers)
         for cell in ws[1]:
             cell.font = Font(bold=True, color="FFFFFF")
-            cell.fill = PatternFill("solid", fgColor="1E293B")
-        for s in items:
-            ws.append(rows[subs.index(s)])
-        for i, (h, _) in enumerate(EXPORT_COLS, start=1):
-            ws.column_dimensions[ws.cell(1, i).column_letter].width = 40 if i in (5, 15, 16, 17) else max(12, len(h) + 2)
+            cell.fill = PatternFill("solid", fgColor="111827")
+        for i in items:
+            ws.append(rows[i])
+        for i, (h, k) in enumerate(EXPORT_COLS, start=1):
+            ws.column_dimensions[ws.cell(1, i).column_letter].width = 40 if k in WIDE_COLS else max(12, len(h) + 2)
     out = io.BytesIO()
     wb.save(out)
     out.seek(0)
     return StreamingResponse(out, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                             headers={"Content-Disposition": f'attachment; filename="rekap_nilai_seni_musik{suffix}_{stamp}.xlsx"'})
+                             headers={"Content-Disposition": f'attachment; filename="{fname}.xlsx"'})
+
+
+async def migrate_legacy():
+    """Convert documents from the previous schema (video_url/submitted_at/grade/published) to the new one."""
+    async for s in db.submissions.find({"video_url": {"$exists": True}}, {"_id": 0}):
+        status = s.get("status")
+        if status == "graded":
+            status = "final" if s.get("published") else "draft"
+        grade = s.get("grade")
+        grade = "D" if grade == "N/A" else grade
+        ai = s.get("ai") or {}
+        upd = {"video_link": s["video_url"], "created_at": s.get("submitted_at") or now_iso(), "status": status,
+               "ai_score": ai.get("final_score", s.get("final_score")),
+               "ai_letter_grade": "D" if ai.get("grade") == "N/A" else ai.get("grade", grade),
+               "ai_strengths": s.get("strengths"), "ai_weaknesses": s.get("weaknesses"), "final_grade": grade}
+        await db.submissions.update_one({"id": s["id"]}, {"$set": upd, "$unset": {
+            "video_url": "", "submitted_at": "", "grade": "", "strengths": "", "weaknesses": "", "published": ""}})
 
 
 app.include_router(api)
@@ -564,6 +629,7 @@ app.add_middleware(CORSMiddleware, allow_credentials=True,
 async def startup():
     await db.submissions.create_index("id", unique=True)
     await db.submissions.create_index([("class_name", 1), ("attendance_number", 1)])
+    await migrate_legacy()
     await db.users.create_index("email", unique=True)
     await db.user_sessions.create_index("session_token")
     if ADMIN_EMAIL:
