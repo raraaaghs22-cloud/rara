@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Loader2, RefreshCw, Save, ExternalLink, Sparkles, Lock, PlayCircle, AlertTriangle, CheckCheck } from "lucide-react";
+import { Loader2, RefreshCw, Save, ExternalLink, Sparkles, Lock, PlayCircle, AlertTriangle, CheckCheck, MessageSquareHeart, Wand2 } from "lucide-react";
 import { toast } from "sonner";
 import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetDescription } from "@/components/ui/sheet";
 import { Input } from "@/components/ui/input";
@@ -75,12 +75,13 @@ export const ReviewSheet = ({ id, onClose, onChanged }) => {
   const [s, setS] = useState(null);
   const [form, setForm] = useState({});
   const [busy, setBusy] = useState(null);
+  const [fbBusy, setFbBusy] = useState(false);
 
   const load = () => api.get(`/admin/submissions/${id}`).then((r) => {
     const d = r.data;
     setS(d);
     setForm({ content_score: d.content_score ?? "", delivery_score: d.delivery_score ?? "", technical_score: d.technical_score ?? "",
-      final_score: d.final_score ?? "", ai_strengths: d.ai_strengths || "", ai_weaknesses: d.ai_weaknesses || "", teacher_notes: d.teacher_notes || "" });
+      final_score: d.final_score ?? "", ai_strengths: d.ai_strengths || "", ai_weaknesses: d.ai_weaknesses || "", teacher_notes: d.teacher_notes || "", student_feedback: d.student_feedback || "" });
   }).catch((e) => { toast.error(errMsg(e, "Data tidak ditemukan")); onClose(); });
   useEffect(() => { if (id) { setS(null); load(); } }, [id]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -98,14 +99,26 @@ export const ReviewSheet = ({ id, onClose, onChanged }) => {
     if (status === "final" && !hasFinal) return toast.error("Isi nilai akhir terlebih dahulu");
     setBusy(status);
     try {
-      const body = { ai_strengths: form.ai_strengths, ai_weaknesses: form.ai_weaknesses, teacher_notes: form.teacher_notes, status };
+      const body = { ai_strengths: form.ai_strengths, ai_weaknesses: form.ai_weaknesses, teacher_notes: form.teacher_notes, student_feedback: form.student_feedback, status };
       if (RUBRIC.every(([k]) => form[k] !== "")) RUBRIC.forEach(([k]) => (body[k] = Number(form[k])));
       if (hasFinal) body.final_score = finalNum;
-      await api.patch(`/admin/submissions/${id}`, body);
-      toast.success(status === "final" ? "Nilai disimpan permanen (Final)" : "Disimpan sebagai Draft");
+      const r = await api.patch(`/admin/submissions/${id}`, body);
+      toast.success(status === "final"
+        ? (form.student_feedback.trim() ? "Nilai Final & komentar dikirim ke siswa" : r.data.student_feedback ? "Nilai Final disimpan · komentar AI dibuat otomatis" : "Nilai Final disimpan")
+        : "Disimpan sebagai Draft");
       onChanged();
-      if (status === "final") onClose(); else load();
+      load();
     } catch (e) { toast.error(errMsg(e)); } finally { setBusy(null); }
+  };
+  const regenFeedback = async () => {
+    setFbBusy(true);
+    try {
+      const body = { ai_strengths: form.ai_strengths, ai_weaknesses: form.ai_weaknesses };
+      if (hasFinal) body.final_score = finalNum;
+      const r = await api.post(`/admin/submissions/${id}/feedback`, body);
+      setForm((f) => ({ ...f, student_feedback: r.data.student_feedback }));
+      toast.success("Komentar AI dibuat ulang");
+    } catch (e) { toast.error(errMsg(e, "Gagal membuat komentar AI")); } finally { setFbBusy(false); }
   };
   const regrade = async () => {
     await api.post(`/admin/submissions/${id}/regrade`);
@@ -185,6 +198,17 @@ export const ReviewSheet = ({ id, onClose, onChanged }) => {
               </div>
             </div>
 
+            <div className="space-y-2 rounded-2xl bg-white/[0.03] p-4 ring-1 ring-white/10" data-testid="block-student-feedback">
+              <div className="flex items-center justify-between gap-2">
+                <p className={`${LBL} flex items-center gap-1.5 text-lime-300`}><MessageSquareHeart className="h-3.5 w-3.5" /> Komentar untuk Siswa</p>
+                <button data-testid="button-regenerate-feedback" onClick={regenFeedback} disabled={fbBusy} className="inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-semibold text-lime-300 ring-1 ring-lime-300/30 transition-colors hover:bg-lime-300/10 disabled:opacity-60">
+                  {fbBusy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Wand2 className="h-3.5 w-3.5" />} {form.student_feedback ? "Buat ulang dengan AI" : "Buat dengan AI"}
+                </button>
+              </div>
+              <Textarea data-testid="textarea-student-feedback" rows={4} className={AREA} placeholder="Kosongkan untuk dibuat otomatis oleh AI saat Simpan Permanen (Final)." value={form.student_feedback} onChange={(e) => setForm({ ...form, student_feedback: e.target.value })} />
+              <p className="text-[11px] text-zinc-500">Tampil di halaman Cek Nilai bersama Nilai Final{s.status === "final" ? "." : " setelah disimpan permanen."}</p>
+            </div>
+
             <div className="space-y-2">
               <p className={`${LBL} flex items-center gap-1.5`}><Lock className="h-3 w-3" /> Catatan Guru (privat)</p>
               <Textarea data-testid="textarea-teacher-notes" rows={2} className={AREA} value={form.teacher_notes} onChange={(e) => setForm({ ...form, teacher_notes: e.target.value })} />
@@ -192,7 +216,7 @@ export const ReviewSheet = ({ id, onClose, onChanged }) => {
 
             <div className="sticky bottom-0 -mx-6 space-y-2 border-t border-white/5 bg-[#0b0b0e]/95 px-6 py-4 backdrop-blur">
               <button data-testid="button-save-final" disabled={!!busy} onClick={() => save("final")} className="flex h-11 w-full items-center justify-center gap-2 rounded-xl bg-lime-300 text-sm font-bold text-zinc-950 transition-colors hover:bg-lime-200 disabled:opacity-60">
-                {busy === "final" ? <Loader2 className="h-4 w-4 animate-spin" /> : <CheckCheck className="h-4 w-4" />} Simpan Permanen (Final)
+                {busy === "final" ? <Loader2 className="h-4 w-4 animate-spin" /> : <CheckCheck className="h-4 w-4" />} {busy === "final" && !form.student_feedback.trim() ? "Menyimpan & membuat komentar…" : "Simpan Permanen (Final)"}
               </button>
               <div className="flex gap-2">
                 <button data-testid="button-save-draft" disabled={!!busy} onClick={() => save("draft")} className="flex h-10 flex-1 items-center justify-center gap-2 rounded-xl text-sm font-semibold text-zinc-200 ring-1 ring-white/10 hover:bg-white/5 disabled:opacity-60">

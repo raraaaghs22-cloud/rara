@@ -29,6 +29,7 @@ const DICT = {
     finalScore: "Nilai Akhir",
     notPublished: "Belum difinalkan",
     submittedAt: "Dikirim",
+    feedback: "Komentar Guru",
   },
   en: {
     navSubmit: "Submit Assignment",
@@ -58,6 +59,7 @@ const DICT = {
     finalScore: "Final Score",
     notPublished: "Not finalized yet",
     submittedAt: "Submitted",
+    feedback: "Teacher's Comment",
   },
 };
 

@@ -114,7 +114,14 @@ class SubmissionUpdate(BaseModel):
     ai_strengths: Optional[str] = None
     ai_weaknesses: Optional[str] = None
     teacher_notes: Optional[str] = None
+    student_feedback: Optional[str] = Field(default=None, max_length=2000)
     status: Optional[str] = Field(default=None, pattern="^(draft|final)$")
+
+
+class FeedbackIn(BaseModel):
+    ai_strengths: Optional[str] = None
+    ai_weaknesses: Optional[str] = None
+    final_score: Optional[float] = Field(default=None, ge=0, le=100)
 
 
 class BulkStatus(BaseModel):
@@ -365,6 +372,50 @@ async def grade_submission(sub_id: str):
         await db.submissions.update_one({"id": sub_id}, {"$set": {"status": "failed", "error": str(e)[:300]}})
 
 
+# ---------- Student feedback ----------
+FEEDBACK_PROMPT = """Kamu adalah Guru Seni Musik SMA (Mr. Ocha) yang hangat dan memotivasi. Tugasmu menulis komentar singkat untuk siswa tentang tugas video 'Musik di Sekitar Kita'.
+ATURAN:
+- Tulis dalam Bahasa Indonesia, 2-3 kalimat saja, nada hangat, positif, dan memotivasi.
+- Sapa siswa dengan nama panggilannya (nama depan) di awal kalimat.
+- Sebutkan satu kelebihan utama, lalu satu saran perbaikan yang konkret dan membangun.
+- HANYA gunakan informasi dari data Kelebihan/Kekurangan/Catatan guru. JANGAN mengarang detail isi video yang tidak disebutkan. Jika data tersebut kosong atau '-', tulis komentar umum yang mengapresiasi usaha siswa dan mengingatkan ketentuan tugas (penjelasan fungsi musik + contoh nyata, subtitle, #FungsiMusik dan mention @Mr. Ocha).
+- Jangan menyebut AI, sistem, metadata, privasi, atau angka skor. Jangan memakai emoji berlebihan (maksimal 1).
+- Balas HANYA dengan teks komentar, tanpa judul, tanpa tanda kutip, tanpa markdown."""
+
+
+async def generate_feedback(sub: dict, strengths: Optional[str] = None, weaknesses: Optional[str] = None,
+                            score: Optional[float] = None) -> str:
+    strengths = strengths if strengths is not None else (sub.get("ai_strengths") or "-")
+    weaknesses = weaknesses if weaknesses is not None else (sub.get("ai_weaknesses") or "-")
+    score = score if score is not None else sub.get("final_score")
+    if PRIVACY_WEAKNESS.lower() in weaknesses.lower():
+        weaknesses = "-"
+    if strengths.strip().lower().startswith("tidak ada"):
+        strengths = "-"
+    chat = LlmChat(api_key=EMERGENT_LLM_KEY, session_id=f"feedback-{sub['id']}-{uuid.uuid4().hex[:6]}",
+                   system_message=FEEDBACK_PROMPT).with_model("gemini", "gemini-3.1-pro-preview")
+    prompt = (f"Nama siswa: {sub['full_name']}\nNilai akhir: {score if score is not None else '-'} "
+              f"(grade {letter_grade(score) if score is not None else '-'})\n"
+              f"Kelebihan: {strengths}\nKekurangan & saran: {weaknesses}\n"
+              f"Catatan guru: {sub.get('teacher_notes') or '-'}")
+    reply = await chat.send_message(UserMessage(text=prompt))
+    return reply.strip().strip('"').strip()[:2000]
+
+
+async def ensure_feedback(sub_id: str):
+    """Background: generate feedback for a finalized submission that has none."""
+    s = await db.submissions.find_one({"id": sub_id}, {"_id": 0})
+    if not s or (s.get("student_feedback") or "").strip():
+        return
+    try:
+        fb = await generate_feedback(s)
+        await db.submissions.update_one({"id": sub_id, "$or": [{"student_feedback": {"$in": [None, ""]}},
+                                                               {"student_feedback": {"$exists": False}}]},
+                                        {"$set": {"student_feedback": fb, "feedback_generated_at": now_iso()}})
+    except Exception:
+        logger.exception("Feedback generation failed")
+
+
 # ---------- Public ----------
 async def results_public() -> bool:
     doc = await db.settings.find_one({"key": "results_public"}, {"_id": 0})
@@ -414,7 +465,8 @@ async def public_results(class_name: str, attendance_number: int):
                     "attendance_number": s["attendance_number"], "platform": s["platform"],
                     "created_at": s["created_at"], "is_final": final,
                     "final_score": s.get("final_score") if final else None,
-                    "final_grade": s.get("final_grade") if final else None})
+                    "final_grade": s.get("final_grade") if final else None,
+                    "student_feedback": (s.get("student_feedback") or None) if final else None})
     return out
 
 
@@ -489,9 +541,17 @@ async def update_submission(sub_id: str, data: SubmissionUpdate, _: dict = Depen
         if (upd.get("final_score") if "final_score" in upd else s.get("final_score")) is None:
             raise HTTPException(422, "Cannot finalize without a score")
         upd["finalized_at"] = now_iso()
+        feedback = upd["student_feedback"] if "student_feedback" in upd else s.get("student_feedback")
+        if not (feedback or "").strip():
+            try:
+                upd["student_feedback"] = await generate_feedback(
+                    {**s, **upd}, upd.get("ai_strengths"), upd.get("ai_weaknesses"), upd.get("final_score"))
+                upd["feedback_generated_at"] = now_iso()
+            except Exception:
+                logger.exception("Feedback generation failed on finalize")
     elif new_status == "draft" and s.get("status") in ("pending", "processing", "failed") and "final_score" not in upd:
         upd.pop("status")
-    if set(upd) - {"status", "teacher_notes", "finalized_at"}:
+    if set(upd) - {"status", "teacher_notes", "finalized_at", "student_feedback", "feedback_generated_at"}:
         upd["manually_edited"] = True
     upd["updated_at"] = now_iso()
     await db.submissions.update_one({"id": sub_id}, {"$set": upd})
@@ -507,6 +567,21 @@ async def regrade(sub_id: str, bg: BackgroundTasks, _: dict = Depends(require_ad
     return {"ok": True}
 
 
+@api.post("/admin/submissions/{sub_id}/feedback")
+async def regenerate_feedback(sub_id: str, data: FeedbackIn, _: dict = Depends(require_admin)):
+    s = await db.submissions.find_one({"id": sub_id}, {"_id": 0})
+    if not s:
+        raise HTTPException(404, "Not found")
+    try:
+        fb = await generate_feedback(s, data.ai_strengths, data.ai_weaknesses, data.final_score)
+    except Exception as e:
+        logger.exception("Feedback generation failed")
+        raise HTTPException(502, f"Gagal membuat komentar AI: {str(e)[:120]}")
+    await db.submissions.update_one({"id": sub_id}, {"$set": {"student_feedback": fb, "feedback_generated_at": now_iso(),
+                                                              "updated_at": now_iso()}})
+    return {"student_feedback": fb}
+
+
 @api.delete("/admin/submissions/{sub_id}")
 async def delete_submission(sub_id: str, _: dict = Depends(require_admin)):
     res = await db.submissions.delete_one({"id": sub_id})
@@ -516,12 +591,15 @@ async def delete_submission(sub_id: str, _: dict = Depends(require_admin)):
 
 
 @api.post("/admin/bulk-status")
-async def bulk_status(data: BulkStatus, _: dict = Depends(require_admin)):
+async def bulk_status(data: BulkStatus, bg: BackgroundTasks, _: dict = Depends(require_admin)):
     query = {"id": {"$in": data.ids}, "final_score": {"$ne": None}}
     upd = {"status": data.status, "updated_at": now_iso()}
     if data.status == "final":
         upd["finalized_at"] = now_iso()
     res = await db.submissions.update_many(query, {"$set": upd})
+    if data.status == "final":
+        for sid in data.ids:
+            bg.add_task(ensure_feedback, sid)
     return {"updated": res.modified_count}
 
 
@@ -544,8 +622,8 @@ EXPORT_COLS = [("Kelas", "class_name"), ("No. Absen", "attendance_number"), ("Na
                ("Technical & Tagging (20%)", "technical_score"), ("Nilai Akhir", "final_score"),
                ("Letter Grade", "final_grade"), ("Diedit Manual", "manually_edited"),
                ("Kelebihan (AI)", "ai_strengths"), ("Kekurangan & Saran (AI)", "ai_weaknesses"),
-               ("Catatan Guru", "teacher_notes")]
-WIDE_COLS = {"video_link", "ai_strengths", "ai_weaknesses", "teacher_notes"}
+               ("Komentar untuk Siswa", "student_feedback"), ("Catatan Guru", "teacher_notes")]
+WIDE_COLS = {"video_link", "ai_strengths", "ai_weaknesses", "teacher_notes", "student_feedback"}
 
 
 def export_cell(s: dict, k: str):

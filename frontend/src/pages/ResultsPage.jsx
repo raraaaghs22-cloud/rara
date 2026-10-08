@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Loader2, Lock, Search } from "lucide-react";
+import { Loader2, Lock, Search, MessageSquareHeart } from "lucide-react";
 import PublicShell from "@/components/PublicShell";
 import { PlatformBadge, GradeBadge } from "@/components/Badges";
 import { Input } from "@/components/ui/input";
@@ -13,7 +13,8 @@ const FIELD = "h-11 rounded-xl border-white/10 bg-zinc-900/70 text-white placeho
 const ResultCard = ({ r, i }) => {
   const { t } = useLang();
   return (
-    <div data-testid="card-student-result" className="fade-up flex items-center justify-between gap-4 rounded-2xl bg-zinc-950/80 p-5 ring-1 ring-white/10" style={{ animationDelay: `${i * 60}ms` }}>
+    <div data-testid="card-student-result" className="fade-up rounded-2xl bg-zinc-950/80 p-5 ring-1 ring-white/10" style={{ animationDelay: `${i * 60}ms` }}>
+    <div className="flex items-center justify-between gap-4">
       <div className="min-w-0">
         <p className="truncate font-bold text-white">{r.full_name}</p>
         <div className="mt-1.5 flex flex-wrap items-center gap-2 text-xs text-zinc-500">
@@ -33,6 +34,16 @@ const ResultCard = ({ r, i }) => {
           <p className="mt-1 text-sm text-zinc-500" data-testid="text-result-unpublished">{t.notPublished}</p>
         )}
       </div>
+    </div>
+      {r.is_final && r.student_feedback && (
+        <div className="mt-4 flex gap-3 rounded-xl bg-lime-300/[0.06] p-4 ring-1 ring-lime-300/20" data-testid="text-result-feedback">
+          <MessageSquareHeart className="mt-0.5 h-4 w-4 shrink-0 text-lime-300" />
+          <div>
+            <p className="text-[10px] font-bold uppercase tracking-widest text-lime-300">{t.feedback}</p>
+            <p className="mt-1 text-sm leading-relaxed text-zinc-200">{r.student_feedback}</p>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
