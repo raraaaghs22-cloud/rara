@@ -75,7 +75,8 @@ export const ReviewSheet = ({ id, onClose, onChanged }) => {
   const [s, setS] = useState(null);
   const [form, setForm] = useState({});
   const [busy, setBusy] = useState(null);
-  const [fbBusy, setFbBusy] = useState(false);
+  const [fbPending, setFbPending] = useState(false);
+  const fbBusy = fbPending || s?.feedback_status === "generating";
 
   const load = () => api.get(`/admin/submissions/${id}`).then((r) => {
     const d = r.data;
@@ -84,6 +85,30 @@ export const ReviewSheet = ({ id, onClose, onChanged }) => {
       final_score: d.final_score ?? "", ai_strengths: d.ai_strengths || "", ai_weaknesses: d.ai_weaknesses || "", teacher_notes: d.teacher_notes || "", student_feedback: d.student_feedback || "" });
   }).catch((e) => { toast.error(errMsg(e, "Data tidak ditemukan")); onClose(); });
   useEffect(() => { if (id) { setS(null); load(); } }, [id]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Poll while the AI comment is being generated in the background
+  const generating = s?.feedback_status === "generating";
+  useEffect(() => {
+    if (!id || !generating) return;
+    const started = Date.now();
+    const t = setInterval(async () => {
+      try {
+        const { data: d } = await api.get(`/admin/submissions/${id}`);
+        if (d.feedback_status !== "generating" || Date.now() - started > 180000) {
+          clearInterval(t);
+          setS(d);
+          if (d.feedback_status === "ready") {
+            setForm((f) => ({ ...f, student_feedback: d.student_feedback || "" }));
+            toast.success("Komentar AI untuk siswa siap");
+            onChanged();
+          } else if (d.feedback_status === "failed") {
+            toast.error("Gagal membuat komentar AI. Coba lagi atau tulis manual.");
+          }
+        }
+      } catch { /* keep polling */ }
+    }, 3000);
+    return () => clearInterval(t);
+  }, [id, generating]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const setRubric = (k, v) => {
     const next = { ...form, [k]: v };
@@ -104,21 +129,20 @@ export const ReviewSheet = ({ id, onClose, onChanged }) => {
       if (hasFinal) body.final_score = finalNum;
       const r = await api.patch(`/admin/submissions/${id}`, body);
       toast.success(status === "final"
-        ? (form.student_feedback.trim() ? "Nilai Final & komentar dikirim ke siswa" : r.data.student_feedback ? "Nilai Final disimpan · komentar AI dibuat otomatis" : "Nilai Final disimpan")
+        ? (form.student_feedback.trim() ? "Nilai Final & komentar dikirim ke siswa" : r.data.feedback_status === "generating" ? "Nilai Final disimpan · AI sedang membuat komentar…" : "Nilai Final disimpan")
         : "Disimpan sebagai Draft");
       onChanged();
       load();
     } catch (e) { toast.error(errMsg(e)); } finally { setBusy(null); }
   };
   const regenFeedback = async () => {
-    setFbBusy(true);
+    setFbPending(true);
     try {
       const body = { ai_strengths: form.ai_strengths, ai_weaknesses: form.ai_weaknesses };
       if (hasFinal) body.final_score = finalNum;
-      const r = await api.post(`/admin/submissions/${id}/feedback`, body);
-      setForm((f) => ({ ...f, student_feedback: r.data.student_feedback }));
-      toast.success("Komentar AI dibuat ulang");
-    } catch (e) { toast.error(errMsg(e, "Gagal membuat komentar AI")); } finally { setFbBusy(false); }
+      await api.post(`/admin/submissions/${id}/feedback`, body);
+      setS((p) => ({ ...p, feedback_status: "generating" }));
+    } catch (e) { toast.error(errMsg(e, "Gagal membuat komentar AI")); } finally { setFbPending(false); }
   };
   const regrade = async () => {
     await api.post(`/admin/submissions/${id}/regrade`);
@@ -205,7 +229,8 @@ export const ReviewSheet = ({ id, onClose, onChanged }) => {
                   {fbBusy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Wand2 className="h-3.5 w-3.5" />} {form.student_feedback ? "Buat ulang dengan AI" : "Buat dengan AI"}
                 </button>
               </div>
-              <Textarea data-testid="textarea-student-feedback" rows={4} className={AREA} placeholder="Kosongkan untuk dibuat otomatis oleh AI saat Simpan Permanen (Final)." value={form.student_feedback} onChange={(e) => setForm({ ...form, student_feedback: e.target.value })} />
+              {fbBusy && <p className="flex items-center gap-2 text-xs text-lime-300" data-testid="text-feedback-generating"><Loader2 className="h-3.5 w-3.5 animate-spin" /> AI sedang menulis komentar untuk {s.full_name.split(" ")[0]}…</p>}
+              <Textarea data-testid="textarea-student-feedback" rows={4} disabled={fbBusy} className={`${AREA} disabled:opacity-50`} placeholder="Kosongkan untuk dibuat otomatis oleh AI saat Simpan Permanen (Final)." value={form.student_feedback} onChange={(e) => setForm({ ...form, student_feedback: e.target.value })} />
               <p className="text-[11px] text-zinc-500">Tampil di halaman Cek Nilai bersama Nilai Final{s.status === "final" ? "." : " setelah disimpan permanen."}</p>
             </div>
 
@@ -215,11 +240,11 @@ export const ReviewSheet = ({ id, onClose, onChanged }) => {
             </div>
 
             <div className="sticky bottom-0 -mx-6 space-y-2 border-t border-white/5 bg-[#0b0b0e]/95 px-6 py-4 backdrop-blur">
-              <button data-testid="button-save-final" disabled={!!busy} onClick={() => save("final")} className="flex h-11 w-full items-center justify-center gap-2 rounded-xl bg-lime-300 text-sm font-bold text-zinc-950 transition-colors hover:bg-lime-200 disabled:opacity-60">
-                {busy === "final" ? <Loader2 className="h-4 w-4 animate-spin" /> : <CheckCheck className="h-4 w-4" />} {busy === "final" && !form.student_feedback.trim() ? "Menyimpan & membuat komentar…" : "Simpan Permanen (Final)"}
+              <button data-testid="button-save-final" disabled={!!busy || fbBusy} onClick={() => save("final")} className="flex h-11 w-full items-center justify-center gap-2 rounded-xl bg-lime-300 text-sm font-bold text-zinc-950 transition-colors hover:bg-lime-200 disabled:opacity-60">
+                {busy === "final" ? <Loader2 className="h-4 w-4 animate-spin" /> : <CheckCheck className="h-4 w-4" />} Simpan Permanen (Final)
               </button>
               <div className="flex gap-2">
-                <button data-testid="button-save-draft" disabled={!!busy} onClick={() => save("draft")} className="flex h-10 flex-1 items-center justify-center gap-2 rounded-xl text-sm font-semibold text-zinc-200 ring-1 ring-white/10 hover:bg-white/5 disabled:opacity-60">
+                <button data-testid="button-save-draft" disabled={!!busy || fbBusy} onClick={() => save("draft")} className="flex h-10 flex-1 items-center justify-center gap-2 rounded-xl text-sm font-semibold text-zinc-200 ring-1 ring-white/10 hover:bg-white/5 disabled:opacity-60">
                   {busy === "draft" ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />} {s.status === "final" ? "Kembalikan ke Draft" : "Simpan Draft"}
                 </button>
                 <button data-testid="button-retry-ai-grading" onClick={regrade} disabled={processing} className="flex h-10 items-center gap-2 rounded-xl px-4 text-sm font-semibold text-zinc-200 ring-1 ring-white/10 hover:bg-white/5 disabled:opacity-50"><RefreshCw className="h-4 w-4" /> Nilai ulang AI</button>

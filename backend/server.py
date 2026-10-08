@@ -5,6 +5,8 @@ from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 import os
 import asyncio
+import heapq
+import itertools
 import io
 import re
 import csv
@@ -284,6 +286,61 @@ async def fetch_metadata(url: str, platform: str) -> dict:
     return meta
 
 
+# ---------- LLM helper ----------
+# The LLM gateway limits concurrent requests, so calls are queued per purpose and retried with backoff.
+class PriorityLock:
+    """Single-slot lock where lower priority numbers are served first (teacher actions before background grading)."""
+
+    def __init__(self):
+        self._locked = False
+        self._waiters = []
+        self._seq = itertools.count()
+
+    async def acquire(self, prio: int):
+        if not self._locked:
+            self._locked = True
+            return
+        fut = asyncio.get_running_loop().create_future()
+        heapq.heappush(self._waiters, (prio, next(self._seq), fut))
+        try:
+            await fut
+        except asyncio.CancelledError:
+            if fut.done() and not fut.cancelled():
+                self.release()
+            raise
+
+    def release(self):
+        while self._waiters:
+            _, _, fut = heapq.heappop(self._waiters)
+            if not fut.done():
+                fut.set_result(True)
+                return
+        self._locked = False
+
+
+LLM_LOCK = PriorityLock()
+PRIO_TEACHER, PRIO_BACKGROUND = 0, 1
+
+
+async def ask_llm(system_message: str, session_id: str, prompt: str, prio: int = PRIO_BACKGROUND, attempts: int = 5) -> str:
+    last = None
+    for i in range(attempts):
+        try:
+            await LLM_LOCK.acquire(prio)
+            try:
+                chat = LlmChat(api_key=EMERGENT_LLM_KEY, session_id=f"{session_id}-{uuid.uuid4().hex[:6]}",
+                               system_message=system_message).with_model("gemini", "gemini-3.1-pro-preview")
+                return await chat.send_message(UserMessage(text=prompt))
+            finally:
+                LLM_LOCK.release()
+        except Exception as e:  # noqa: BLE001
+            last = e
+            logger.warning(f"LLM call failed (attempt {i + 1}/{attempts}): {str(e)[:150]}")
+            if i < attempts - 1:
+                await asyncio.sleep(min(30, 3 * 2 ** i))
+    raise last
+
+
 # ---------- AI grading ----------
 SYSTEM_PROMPT = """Kamu adalah Asisten Guru Seni Musik SMA. Evaluasi metadata video ini untuk tugas 'Musik di Sekitar Kita'. JIKA data berisi pesan 'Data gagal diekstrak...', BERHENTI menilai, berikan skor 0, dan tulis di Weaknesses: 'Sistem tidak dapat membaca konten karena privasi. Silakan nilai secara manual'. JIKA data tersedia, nilai dengan rubrik berikut: Content & Context (50%): Penjelasan fungsi musik & contoh nyata. Delivery & Subtitles (30%): Gaya bahasa komunikatif & teks. Technical & Tagging (20%): Ada #FungsiMusik dan mention @Mr. Ocha.
 
@@ -343,11 +400,9 @@ async def grade_submission(sub_id: str):
         meta = await fetch_metadata(sub["video_link"], sub["platform"])
         payload = metadata_text(meta)
         extraction_ok = payload != EXTRACTION_FAILED
-        chat = LlmChat(api_key=EMERGENT_LLM_KEY, session_id=f"grade-{sub_id}-{uuid.uuid4().hex[:6]}",
-                       system_message=SYSTEM_PROMPT).with_model("gemini", "gemini-3.1-pro-preview")
         prompt = (f"Siswa: {sub['full_name']} (Kelas {sub['class_name']}, Absen {sub['attendance_number']})\n"
                   f"Link video: {sub['video_link']}\n\nMetadata video:\n{payload}")
-        reply = await chat.send_message(UserMessage(text=prompt))
+        reply = await ask_llm(SYSTEM_PROMPT, f"grade-{sub_id}", prompt, PRIO_BACKGROUND, attempts=5)
         res = parse_json(reply)
         if not extraction_ok:
             c = d = t = score = 0.0
@@ -384,7 +439,7 @@ ATURAN:
 
 
 async def generate_feedback(sub: dict, strengths: Optional[str] = None, weaknesses: Optional[str] = None,
-                            score: Optional[float] = None) -> str:
+                            score: Optional[float] = None, prio: int = PRIO_BACKGROUND, attempts: int = 4) -> str:
     strengths = strengths if strengths is not None else (sub.get("ai_strengths") or "-")
     weaknesses = weaknesses if weaknesses is not None else (sub.get("ai_weaknesses") or "-")
     score = score if score is not None else sub.get("final_score")
@@ -392,28 +447,37 @@ async def generate_feedback(sub: dict, strengths: Optional[str] = None, weakness
         weaknesses = "-"
     if strengths.strip().lower().startswith("tidak ada"):
         strengths = "-"
-    chat = LlmChat(api_key=EMERGENT_LLM_KEY, session_id=f"feedback-{sub['id']}-{uuid.uuid4().hex[:6]}",
-                   system_message=FEEDBACK_PROMPT).with_model("gemini", "gemini-3.1-pro-preview")
     prompt = (f"Nama siswa: {sub['full_name']}\nNilai akhir: {score if score is not None else '-'} "
               f"(grade {letter_grade(score) if score is not None else '-'})\n"
               f"Kelebihan: {strengths}\nKekurangan & saran: {weaknesses}\n"
               f"Catatan guru: {sub.get('teacher_notes') or '-'}")
-    reply = await chat.send_message(UserMessage(text=prompt))
+    reply = await ask_llm(FEEDBACK_PROMPT, f"feedback-{sub['id']}", prompt, prio, attempts=attempts)
     return reply.strip().strip('"').strip()[:2000]
 
 
-async def ensure_feedback(sub_id: str):
-    """Background: generate feedback for a finalized submission that has none."""
+async def feedback_job(sub_id: str, overrides: Optional[dict] = None, only_if_empty: bool = False,
+                       prio: int = PRIO_TEACHER):
+    """Background: (re)generate the student comment and store it. Status tracked in feedback_status."""
     s = await db.submissions.find_one({"id": sub_id}, {"_id": 0})
-    if not s or (s.get("student_feedback") or "").strip():
+    if not s:
         return
+    if only_if_empty and (s.get("status") != "final" or (s.get("student_feedback") or "").strip()):
+        if s.get("feedback_status") == "generating":
+            await db.submissions.update_one({"id": sub_id}, {"$set": {"feedback_status": "ready"}})
+        return
+    o = overrides or {}
     try:
-        fb = await generate_feedback(s)
-        await db.submissions.update_one({"id": sub_id, "$or": [{"student_feedback": {"$in": [None, ""]}},
-                                                               {"student_feedback": {"$exists": False}}]},
-                                        {"$set": {"student_feedback": fb, "feedback_generated_at": now_iso()}})
-    except Exception:
+        fb = await generate_feedback(s, o.get("ai_strengths"), o.get("ai_weaknesses"), o.get("final_score"), prio=prio)
+        query = {"id": sub_id}
+        if only_if_empty:
+            query["$or"] = [{"student_feedback": {"$in": [None, ""]}}, {"student_feedback": {"$exists": False}}]
+        await db.submissions.update_one(query, {"$set": {"student_feedback": fb, "feedback_status": "ready",
+                                                         "feedback_generated_at": now_iso()}})
+        await db.submissions.update_one({"id": sub_id, "feedback_status": "generating"}, {"$set": {"feedback_status": "ready"}})
+    except Exception as e:
         logger.exception("Feedback generation failed")
+        await db.submissions.update_one({"id": sub_id}, {"$set": {"feedback_status": "failed",
+                                                                  "feedback_error": str(e)[:200]}})
 
 
 # ---------- Public ----------
@@ -521,7 +585,7 @@ async def get_submission(sub_id: str, _: dict = Depends(require_admin)):
 
 
 @api.patch("/admin/submissions/{sub_id}")
-async def update_submission(sub_id: str, data: SubmissionUpdate, _: dict = Depends(require_admin)):
+async def update_submission(sub_id: str, data: SubmissionUpdate, bg: BackgroundTasks, _: dict = Depends(require_admin)):
     s = await db.submissions.find_one({"id": sub_id}, {"_id": 0})
     if not s:
         raise HTTPException(404, "Not found")
@@ -543,15 +607,11 @@ async def update_submission(sub_id: str, data: SubmissionUpdate, _: dict = Depen
         upd["finalized_at"] = now_iso()
         feedback = upd["student_feedback"] if "student_feedback" in upd else s.get("student_feedback")
         if not (feedback or "").strip():
-            try:
-                upd["student_feedback"] = await generate_feedback(
-                    {**s, **upd}, upd.get("ai_strengths"), upd.get("ai_weaknesses"), upd.get("final_score"))
-                upd["feedback_generated_at"] = now_iso()
-            except Exception:
-                logger.exception("Feedback generation failed on finalize")
+            upd["feedback_status"] = "generating"
+            bg.add_task(feedback_job, sub_id, None, True, PRIO_TEACHER)
     elif new_status == "draft" and s.get("status") in ("pending", "processing", "failed") and "final_score" not in upd:
         upd.pop("status")
-    if set(upd) - {"status", "teacher_notes", "finalized_at", "student_feedback", "feedback_generated_at"}:
+    if set(upd) - {"status", "teacher_notes", "finalized_at", "student_feedback", "feedback_status"}:
         upd["manually_edited"] = True
     upd["updated_at"] = now_iso()
     await db.submissions.update_one({"id": sub_id}, {"$set": upd})
@@ -568,18 +628,12 @@ async def regrade(sub_id: str, bg: BackgroundTasks, _: dict = Depends(require_ad
 
 
 @api.post("/admin/submissions/{sub_id}/feedback")
-async def regenerate_feedback(sub_id: str, data: FeedbackIn, _: dict = Depends(require_admin)):
-    s = await db.submissions.find_one({"id": sub_id}, {"_id": 0})
-    if not s:
+async def regenerate_feedback(sub_id: str, data: FeedbackIn, bg: BackgroundTasks, _: dict = Depends(require_admin)):
+    res = await db.submissions.update_one({"id": sub_id}, {"$set": {"feedback_status": "generating", "feedback_error": None}})
+    if not res.matched_count:
         raise HTTPException(404, "Not found")
-    try:
-        fb = await generate_feedback(s, data.ai_strengths, data.ai_weaknesses, data.final_score)
-    except Exception as e:
-        logger.exception("Feedback generation failed")
-        raise HTTPException(502, f"Gagal membuat komentar AI: {str(e)[:120]}")
-    await db.submissions.update_one({"id": sub_id}, {"$set": {"student_feedback": fb, "feedback_generated_at": now_iso(),
-                                                              "updated_at": now_iso()}})
-    return {"student_feedback": fb}
+    bg.add_task(feedback_job, sub_id, data.model_dump(exclude_none=True), False, PRIO_TEACHER)
+    return {"feedback_status": "generating"}
 
 
 @api.delete("/admin/submissions/{sub_id}")
@@ -598,8 +652,15 @@ async def bulk_status(data: BulkStatus, bg: BackgroundTasks, _: dict = Depends(r
         upd["finalized_at"] = now_iso()
     res = await db.submissions.update_many(query, {"$set": upd})
     if data.status == "final":
-        for sid in data.ids:
-            bg.add_task(ensure_feedback, sid)
+        targets = await db.submissions.find({"id": {"$in": data.ids}, "status": "final",
+                                             "$or": [{"student_feedback": {"$in": [None, ""]}},
+                                                     {"student_feedback": {"$exists": False}}]},
+                                            {"_id": 0, "id": 1}).to_list(5000)
+        if targets:
+            await db.submissions.update_many({"id": {"$in": [t["id"] for t in targets]}},
+                                             {"$set": {"feedback_status": "generating"}})
+        for t in targets:
+            bg.add_task(feedback_job, t["id"], None, True, PRIO_BACKGROUND)
     return {"updated": res.modified_count}
 
 
@@ -716,6 +777,9 @@ async def startup():
     stuck = await db.submissions.find({"status": {"$in": ["pending", "processing"]}}, {"_id": 0, "id": 1}).to_list(500)
     for s in stuck:
         asyncio.create_task(grade_submission(s["id"]))
+    fb_stuck = await db.submissions.find({"feedback_status": "generating"}, {"_id": 0, "id": 1}).to_list(500)
+    for s in fb_stuck:
+        asyncio.create_task(feedback_job(s["id"], None, True, PRIO_BACKGROUND))
 
 
 @app.on_event("shutdown")

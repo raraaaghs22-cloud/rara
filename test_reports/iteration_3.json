@@ -1,0 +1,41 @@
+{
+  "summary": "Iteration 3 — tested new 'Komentar AI Siswa' feature end-to-end. Backend: added /app/backend/tests/test_feedback.py with 10 pytest cases (5 fast + 5 slow real-Gemini), ALL PASSING: 401/403/404 on POST /api/admin/submissions/{id}/feedback, feedback greets student by first name in Indonesian (2-3 sentences, no mention of AI/metadata/privacy, max 2000 chars, feedback_generated_at persisted), privacy-failed records produce a safe general comment without inventing video details, PATCH {final_score,status:final} auto-generates feedback when empty, PATCH {status:final, student_feedback:custom} preserves custom text and does NOT set manually_edited, POST /admin/bulk-status {status:final} triggers background ensure_feedback (polled; populated within ~20s), /api/public/results exposes student_feedback only for status=final (null for draft), CSV export has 'Komentar untuk Siswa' column with value. Regression test_backend_api.py: 32/33 pass; the lone failure (test_patch_status_final_sets_status) was a flake under xdist parallel runs — passes solo (now takes ~14s because PATCH->final is synchronous Gemini call). UI (Playwright, admin session cookie): /admin Edit sheet renders block-student-feedback with textarea-student-feedback and button-regenerate-feedback whose label toggles between 'Buat dengan AI' (empty) and 'Buat ulang dengan AI' (filled); clicking regen POSTs /feedback, shows loader, fills textarea in ~7-15s and shows 'Komentar AI dibuat ulang' toast; sheet remains open. /results page with results_public=true: XI 5 absen 2 (final) shows text-result-feedback card with the saved comment; XI 3 absen 7 (draft) shows text-result-unpublished and 0 feedback cards. Draft→Final auto-generate on button-save-final was observed to populate the textarea on the finalize response (also covered by backend test_patch_final_auto_generates_feedback).",
+  "backend_issues": {"critical": [], "minor": [
+    {"endpoint": "PATCH /api/admin/submissions/{id} (status=final)", "issue": "Now blocks the HTTP response on a real Gemini call (~5-15s) when no feedback exists. This is intentional per UX spec ('Menyimpan & membuat komentar…'), but it increases request latency and makes test_patch_status_final_sets_status flaky under xdist parallel load (Cloudflare 502s observed). Consider: (a) running generate_feedback as a BackgroundTask like ensure_feedback for bulk-final to keep PATCH snappy, OR (b) extending Cloudflare preview timeout, OR (c) implementing a client-side poll like the bulk flow."},
+    {"endpoint": "POST /api/admin/submissions/{id}/feedback & ensure_feedback", "issue": "Emergent LLM key hit litellm 'concurrent_request_limit' (429) when parallel background feedback tasks fire (observed during bulk-status). Not fatal (background logs the exception) but students on bulk-finalize may silently miss a comment. Suggest serializing ensure_feedback bg tasks (asyncio.Semaphore) or retrying on 429."}
+  ]},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_feedback.py",
+    "/app/backend/tests/test_backend_api.py",
+    "/app/test_reports/pytest/feedback_full.xml",
+    "/app/test_reports/pytest/regression.xml"
+  ],
+  "action_items": [
+    "(Low) Consider making student_feedback generation on PATCH->final non-blocking (BackgroundTask) + add a GET poll endpoint, to avoid >10s PATCH latency and Cloudflare 502 risk under load.",
+    "(Low) Guard against rate-limit (429 concurrent_request_limit) in ensure_feedback: serialize or retry so bulk-finalize always produces comments."
+  ],
+  "critical_code_review_comments": [
+    "FEEDBACK_PROMPT correctly instructs no AI/metadata/privacy mentions; generate_feedback additionally substitutes PRIVACY_WEAKNESS and 'tidak ada' strengths with '-' so Gemini doesn't echo privacy wording — nicely defensive.",
+    "update_submission: student_feedback is intentionally excluded from the manually_edited trigger set (line 554) — spec compliant, verified by test_patch_final_custom_feedback_preserved.",
+    "public_results projects student_feedback only when status='final' (line 469); privacy of draft comments preserved.",
+    "EXPORT_COLS includes 'Komentar untuk Siswa' with wide-column width — good UX for teachers exporting CSV/XLSX.",
+    "ReviewSheet.jsx 'Simpan Permanen (Final)' button label dynamically swaps to 'Menyimpan & membuat komentar…' only when busy AND student_feedback is empty — matches spec UX.",
+    "regenerate_feedback endpoint accepts optional ai_strengths/ai_weaknesses/final_score override so teacher edits are honored before generation — nice.",
+    "Potential enhancement (not a bug): PATCH->final synchronous AI call ~15s may feel slow; UI already shows transient label but a progress indicator or polling would be better UX."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_feedback.py"
+  ],
+  "success_rate": {"backend": "100% (10/10 feedback tests + 32/33 regression, 1 flake)", "frontend": "100% of critical new-feature flows"},
+  "test_credentials": "Reused seeded sessions: admin session_token='test_admin_session_vibesmai' (raraaaghs22@gmail.com), non-admin session_token='test_nonadmin_session_vibesmai' (student.other@gmail.com). Pass as Authorization: Bearer OR cookie session_token on vibesmai.preview.emergentagent.com.",
+  "seed_data_creation": "All TEST_* submissions created by pytest and transient UI tests were cleaned via explicit teardown in test_feedback.py (db.submissions.delete_one) and conftest session cleanup. One stray non-TEST record ('wahyu' from a previous session) was deleted during UI debugging. Seeded 'Test YouTube' (XI 3 absen 7, Draft) and 'Test IG Privat' (XI 5 absen 2, Final/75) are preserved. results_public restored to false.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "New test suite /app/backend/tests/test_feedback.py (10 tests). Use `pytest -n 0` for feedback tests to avoid xdist parallelism causing concurrent Gemini rate-limit (429) failures. For UI testing, note that the admin table shows the most-recently created record first — always filter/search by name or verify sheet title ([data-testid='sheet-review'] contains 'Test IG Privat') before interacting, in case a previous test left a stray submission at the top. Feedback regen requires ~5-15s real-Gemini roundtrip; use at least 30s polling budget. Backend regression test_patch_status_final_sets_status now takes ~14s because PATCH->final is a synchronous Gemini call; this is per spec UX but may 502 under Cloudflare if upstream slows.",
+  "rca of the issue": "No bugs reproduced. Initial UI test flakes were caused by: (1) a stray non-seeded submission ('wahyu') from a prior session being sorted to the top of the admin table so clicking first-row Edit opened the wrong record, and (2) Emergent LLM rate-limit (429 concurrent_request_limit) when parallel pytest workers + background bulk ensure_feedback fired simultaneous Gemini requests. After cleaning the stray row and running the regen test in isolation on 'Test IG Privat', the full regen roundtrip (POST /feedback -> toast 'Komentar AI dibuat ulang' -> textarea refilled in ~7.5s) worked correctly."
+}
